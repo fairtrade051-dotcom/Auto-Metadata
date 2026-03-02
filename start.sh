@@ -2,25 +2,25 @@
 
 echo "🚀 Starting Auto-Setup..."
 
-# 1. บังคับให้ Ollama เก็บโมเดลในพื้นที่ถาวร (/workspace) จะได้ไม่โหลดใหม่ทุกครั้ง
-export OLLAMA_MODELS="/workspace/ollama_models"
+# บังคับให้เข้ามาในโฟลเดอร์โปรเจกต์ชัวร์ๆ จะได้หาไฟล์ requirements.txt เจอ
+cd /workspace/Auto-Metadata
 
-# 2. ติดตั้งเครื่องมือพื้นฐาน
+# 1. ติดตั้งเครื่องมือ
 apt-get update && apt-get install -y exiftool curl
 
-# 3. ติดตั้งโปรแกรม Ollama
+# 2. ติดตั้งโปรแกรม Ollama
 curl -fsSL https://ollama.com/install.sh | sh
 
-# 4. เปิดระบบ Ollama ทิ้งไว้เบื้องหลัง
-ollama serve &
-sleep 5 # รอระบบเซ็ตตัว 5 วินาที
+# 3. เปิดระบบ Ollama (ใช้ Full Path เพื่อแก้ปัญหา command not found)
+/usr/local/bin/ollama serve &
+sleep 10 # รอระบบเซ็ตตัว 10 วินาทีให้ชัวร์
 
-# 5. โหลดโมเดล Gemma 3 (ถ้ามีใน /workspace แล้วมันจะข้ามสเต็ปนี้ให้เลย เร็วมาก)
-ollama pull gemma3:4b
+# 4. โหลดโมเดล Gemma 3
+/usr/local/bin/ollama pull gemma3:4b
 
-# 6. ติดตั้ง Library Python (Gradio, etc.)
+# 5. ติดตั้ง Library Python (ตอนนี้ระบบจะหา requirements.txt เจอแล้ว)
 pip install -r requirements.txt
 
-# 7. เปิดหน้า Web UI
+# 6. เปิดหน้า Web UI
 echo "✅ All set! Launching Web UI..."
 python app.py
