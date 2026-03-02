@@ -7,12 +7,12 @@ from PIL import Image
 from openai import OpenAI
 from io import BytesIO
 
-# ✅ เชื่อมต่อ Ollama (รันใน RunPod เครื่องเดียวกัน)
+# ✅ เชื่อมต่อ Ollama
 client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
 
 # 📁 ตั้งค่า Folder บน RunPod
 output_folder = "/workspace/output_images"
-os.makedirs(output_folder, exist_ok=True)
+zip_filepath = "/workspace/processed_images.zip"
 
 def encode_image_to_base64(image_path):
     with Image.open(image_path) as img:
@@ -22,12 +22,13 @@ def encode_image_to_base64(image_path):
         img.save(buffered, format="JPEG", quality=80)
         return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-def generate_metadata_from_vision(image_path):
+def generate_metadata_from_vision(image_path, keyword_count):
     base64_image = encode_image_to_base64(image_path)
-    prompt = """Analyze this image and provide:
+    # รับค่าจำนวนคีย์เวิร์ดจาก UI มาใส่ใน Prompt
+    prompt = f"""Analyze this image and provide:
     1. A short, descriptive Title (max 10 words).
     2. A detailed Description (1 sentence).
-    3. Exactly 49 unique, short keywords separated by commas.
+    3. Exactly {keyword_count} unique, short keywords separated by commas.
     
     Format your response EXACTLY like this:
     Title: [Your Title]
@@ -83,59 +84,85 @@ def embed_metadata(image_path, title, description, keywords, temp_out_dir):
         print(f"ExifTool Error: {e}")
         return None
 
-def process_images(image_files):
+def process_images(image_files, keyword_count):
     if not image_files:
-        return [], "⚠️ ไม่พบไฟล์รูปภาพ กรุณาอัปโหลดใหม่"
+        return [], None, "⚠️ ไม่พบไฟล์รูปภาพ", []
     
-    # ล้างโฟลเดอร์ output เก่าก่อน
+    # ล้างไฟล์เก่า
     if os.path.exists(output_folder):
         shutil.rmtree(output_folder)
     os.makedirs(output_folder, exist_ok=True)
+    if os.path.exists(zip_filepath):
+        os.remove(zip_filepath)
 
     processed_paths = []
     log_messages = []
+    metadata_info_list = [] # เก็บข้อมูลไว้แสดงตอนคลิกรูป
 
     for file_obj in image_files:
-        img_path = file_obj.name # Gradio เก็บไฟล์ชั่วคราวไว้
+        img_path = file_obj.name
         filename = os.path.basename(img_path)
         log_messages.append(f"🔄 กำลังประมวลผล: {filename}")
         
-        # 1. AI วิเคราะห์
-        title, desc, kws = generate_metadata_from_vision(img_path)
-        log_messages.append(f"✨ หัวข้อ: {title} | คีย์เวิร์ด: {len(kws)} คำ")
+        title, desc, kws = generate_metadata_from_vision(img_path, keyword_count)
+        
+        # จัดเก็บข้อมูลสำหรับแสดงผลตอนคลิก
+        info_text = f"📌 ไฟล์: {filename}\n🏷️ หัวข้อ: {title}\n📝 คำอธิบาย: {desc}\n🔑 คีย์เวิร์ด ({len(kws)} คำ):\n{', '.join(kws)}"
+        metadata_info_list.append(info_text)
 
-        # 2. ฝัง Metadata
         out_path = embed_metadata(img_path, title, desc, kws, output_folder)
         if out_path:
             processed_paths.append(out_path)
-            log_messages.append(f"✅ สำเร็จ: {filename}\n---")
+            log_messages.append(f"✅ สำเร็จ: {filename} (ได้คีย์เวิร์ด {len(kws)} คำ)\n---")
         else:
             log_messages.append(f"❌ ล้มเหลว: {filename}\n---")
 
-    return processed_paths, "\n".join(log_messages)
+    # สร้างไฟล์ ZIP
+    shutil.make_archive(zip_filepath.replace('.zip', ''), 'zip', output_folder)
 
-# --- สร้าง Web UI ด้วย Gradio ---
+    return processed_paths, zip_filepath, "\n".join(log_messages), metadata_info_list
+
+def show_metadata(evt: gr.SelectData, metadata_list):
+    # ดึงข้อมูลจาก Index ของรูปที่ถูกคลิก
+    if metadata_list and evt.index < len(metadata_list):
+        return metadata_list[evt.index]
+    return "ไม่มีข้อมูล"
+
+# --- UI ด้วย Gradio ---
 with gr.Blocks(title="Auto Metadata AI", theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# 🖼️ AI Auto Metadata Tagger (Gemma 3)")
-    gr.Markdown("อัปโหลดรูปภาพเพื่อให้ AI วิเคราะห์และฝัง Metadata อัตโนมัติ พร้อมส่งขาย Stock")
+    gr.Markdown("# 🖼️ AI Auto Metadata Tagger (Gemma 3) 🚀")
     
+    # ตัวแปรซ่อนสำหรับเก็บข้อมูล Metadata แต่ละรูป
+    metadata_state = gr.State([])
+
     with gr.Row():
         with gr.Column(scale=1):
             file_input = gr.File(label="📂 1. อัปโหลดรูปภาพ (เลือกได้หลายรูป)", file_count="multiple", type="filepath")
-            submit_btn = gr.Button("🚀 2. เริ่มประมวลผล", variant="primary")
-        
-        with gr.Column(scale=1):
-            log_output = gr.Textbox(label="📝 สถานะการทำงาน", lines=10, interactive=False)
+            keyword_slider = gr.Slider(minimum=10, maximum=50, value=49, step=1, label="🎛️ 2. กำหนดจำนวนคีย์เวิร์ดที่ต้องการ")
+            submit_btn = gr.Button("🚀 3. เริ่มประมวลผล", variant="primary")
             
-    with gr.Row():
-        gallery_output = gr.Gallery(label="✅ รูปที่ประมวลผลเสร็จแล้ว (ดาวน์โหลดได้เลย)", columns=4, height="auto")
+            gr.Markdown("---")
+            download_zip = gr.File(label="📦 โหลดไฟล์ทั้งหมดเป็น ZIP (เมื่อเสร็จสิ้น)", interactive=False)
+            log_output = gr.Textbox(label="📝 สถานะการทำงาน", lines=6, interactive=False)
+        
+        with gr.Column(scale=2):
+            gr.Markdown("### 🖼️ ผลลัพธ์ (คลิกที่รูปเพื่อดูคีย์เวิร์ด)")
+            gallery_output = gr.Gallery(label="รูปที่ประมวลผลแล้ว", columns=3, height="auto")
+            selected_info = gr.Textbox(label="🔍 ข้อมูล Metadata ของรูปที่เลือก", lines=5, interactive=False)
 
+    # เมื่อกดปุ่มประมวลผล
     submit_btn.click(
         fn=process_images,
-        inputs=file_input,
-        outputs=[gallery_output, log_output]
+        inputs=[file_input, keyword_slider],
+        outputs=[gallery_output, download_zip, log_output, metadata_state]
+    )
+
+    # เมื่อคลิกที่รูปใน Gallery
+    gallery_output.select(
+        fn=show_metadata,
+        inputs=[metadata_state],
+        outputs=[selected_info]
     )
 
 if __name__ == "__main__":
-    # เปิด UI บน Port 7860 สำหรับ RunPod
     demo.launch(server_name="0.0.0.0", server_port=7860)
