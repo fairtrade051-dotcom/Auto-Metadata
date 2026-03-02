@@ -165,4 +165,5 @@ with gr.Blocks(title="Auto Metadata AI", theme=gr.themes.Soft()) as demo:
     )
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    # เพิ่ม allowed_paths เข้าไปเพื่ออนุญาตให้ Gradio ดึงรูปและ ZIP จาก /workspace ได้
+    demo.launch(server_name="0.0.0.0", server_port=7860, allowed_paths=["/workspace"])
