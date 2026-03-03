@@ -1,24 +1,25 @@
 import os, subprocess, shutil, re, gradio as gr, ollama
 from PIL import Image
 
+# กำหนด Path ให้ชัดเจน
 output_folder = "/workspace/output_images"
+zip_base_name = "/workspace/processed_images"
 zip_filepath = "/workspace/processed_images.zip"
 
 def generate_metadata(image_path, kw_count):
     try:
-        prompt = f"Describe this image for stock photography. Output as:\nTitle: [title]\nDescription: [description]\nKeywords: [keyword1, keyword2, ... {kw_count} words]"
+        prompt = f"Act as a professional stock photographer. Describe this image. Output exactly in this format:\nTitle: [title]\nDescription: [description]\nKeywords: [keyword1, keyword2, ... {kw_count} words]"
         
+        # ส่งไปหา AI
         res = ollama.chat(model='llama3.2-vision', messages=[{
             'role': 'user', 'content': prompt, 'images': [image_path]
         }])
         
         txt = res['message']['content'].replace("*", "")
         
-        title = "Untitled"
-        desc = "No Description"
-        keywords = []
+        title, desc, keywords = "Untitled", "No Description", []
 
-        # ใช้ Regex ดึงข้อมูล
+        # สกัดข้อมูลด้วย Regex
         t_match = re.search(r"(?i)Title:\s*(.*)", txt)
         if t_match: title = t_match.group(1).strip()
 
@@ -29,90 +30,104 @@ def generate_metadata(image_path, kw_count):
         if k_match:
             keywords = [k.strip() for k in k_match.group(1).split(",") if len(k.strip()) > 1]
         
+        # ป้องกันถ้าหา Keywords ไม่เจอ
         if not keywords:
             keywords = [k.strip() for k in txt.split() if len(k.strip()) > 3][:kw_count]
 
         return title, desc, keywords[:kw_count], txt
     except Exception as e:
-        return "Error", "Error", ["error"], f"AI Error: {str(e)}"
+        return "Error", "Error", ["error"], f"AI Crash: {str(e)}"
 
 def embed_metadata(image_path, title, desc, keywords):
     try:
         kw_str = ", ".join(keywords)
-        # ฝังมันทุก Tag ที่โลกนี้ใช้ (Windows, Adobe, Stock sites)
+        # ฝังทุก Tags (IPTC, XMP, EXIF)
         cmd = [
             "exiftool", "-overwrite_original", "-charset", "UTF8",
-            f"-Title={title}",
-            f"-XPTitle={title}",
-            f"-XMP-dc:Title={title}",
-            f"-Description={desc}",
-            f"-ImageDescription={desc}",
-            f"-XMP-dc:Description={desc}",
-            f"-Keywords={kw_str}",
-            f"-Subject={kw_str}",
-            f"-XMP-dc:Subject={kw_str}",
-            f"-IPTC:Keywords={kw_str}",
-            f"-XPKeywords={kw_str}",
+            f"-Title={title}", f"-XPTitle={title}", f"-XMP-dc:Title={title}",
+            f"-Description={desc}", f"-ImageDescription={desc}", f"-XMP-dc:Description={desc}",
+            f"-Keywords={kw_str}", f"-Subject={kw_str}", f"-XMP-dc:Subject={kw_str}",
+            f"-IPTC:Keywords={kw_str}", f"-XPKeywords={kw_str}",
             image_path
         ]
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        return True, result.stdout
-    except subprocess.CalledProcessError as e:
-        return False, e.stderr
+        subprocess.run(cmd, check=True, capture_output=True)
+        return True, "OK"
+    except Exception as e:
+        return False, str(e)
 
 def process(files, kw_count):
-    if not files: yield [], None, "❌ No files!", [], "Please upload images."; return
+    if not files: yield [], None, "❌ ไม่มีไฟล์ที่อัปโหลด!", [], ""; return
+    
+    # ล้างโฟลเดอร์เก่าทิ้งและสร้างใหม่
     if os.path.exists(output_folder): shutil.rmtree(output_folder)
     os.makedirs(output_folder, exist_ok=True)
+    if os.path.exists(zip_filepath): os.remove(zip_filepath)
     
     results, logs, meta_list = [], [], []
-    yield results, None, "🚀 Starting...", meta_list, ""
+    processed_count = 0
+    
+    yield results, None, "🚀 เริ่มกระบวนการ...", meta_list, ""
 
     for i, f in enumerate(files):
         filename = os.path.basename(f.name)
-        logs.append(f"🔄 Processing {i+1}/{len(files)}")
+        logs.append(f"🔄 [{i+1}/{len(files)}] กำลังทำ: {filename}")
         yield results, None, "\n".join(logs[-5:]), meta_list, ""
         
+        # 1. ให้ AI วิเคราะห์
         t, d, k, raw_ai = generate_metadata(f.name, kw_count)
         
         if t == "Error":
-            logs[-1] = f"❌ AI Fail: {filename}"
-            meta_list.append(f"File: {filename}\nError: AI did not respond")
+            logs[-1] = f"❌ AI Error: {filename}"
+            meta_list.append(f"ไฟล์ {filename}: AI ไม่ตอบกลับ หรือ Model ยังไม่พร้อม")
         else:
-            out = os.path.join(output_folder, filename)
-            with Image.open(f.name) as img:
-                img.convert('RGB').save(out, "JPEG", quality=100)
-            
-            success, ex_log = embed_metadata(out, t, d, k)
-            if success:
-                logs[-1] = f"✅ Success: {filename}"
-                meta_list.append(f"File: {filename}\nTitle: {t}\nKeywords: {', '.join(k)}")
-            else:
-                logs[-1] = f"⚠️ Tag Fail: {filename}"
-                meta_list.append(f"File: {filename}\nExifTool Error: {ex_log}")
-        
-        results.append(out if t != "Error" else f.name)
+            # 2. บันทึกรูปใหม่ลงโฟลเดอร์ Output
+            out_path = os.path.join(output_folder, filename)
+            try:
+                with Image.open(f.name) as img:
+                    img.convert('RGB').save(out_path, "JPEG", quality=100)
+                
+                # 3. ฝัง Metadata
+                success, ex_err = embed_metadata(out_path, t, d, k)
+                if success:
+                    processed_count += 1
+                    logs[-1] = f"✅ สำเร็จ: {filename}"
+                    results.append(out_path)
+                    meta_list.append(f"📌 {filename}\nTitle: {t}\nKeywords: {', '.join(k)}")
+                else:
+                    logs[-1] = f"⚠️ ฝัง Metadata ไม่เข้า: {filename}"
+                    meta_list.append(f"ไฟล์ {filename}: Metadata Error -> {ex_err}")
+            except Exception as img_err:
+                logs[-1] = f"❌ บันทึกรูปไม่ได้: {filename}"
+                meta_list.append(f"ไฟล์ {filename}: Image Error -> {str(img_err)}")
+
         yield results, None, "\n".join(logs[-5:]), meta_list, raw_ai
 
-    shutil.make_archive(zip_filepath.replace('.zip',''), 'zip', output_folder)
-    yield results, zip_filepath, "🎉 Batch Done!", meta_list, "All processes finished."
+    # 4. ตรวจสอบก่อนทำ ZIP
+    if processed_count > 0:
+        logs.append(f"📦 กำลังรวมไฟล์ {processed_count} รูปเข้าไฟล์ ZIP...")
+        yield results, None, "\n".join(logs[-5:]), meta_list, "Zipping..."
+        shutil.make_archive(zip_base_name, 'zip', output_folder)
+        yield results, zip_filepath, "🎉 เสร็จเรียบร้อย! โหลดไฟล์ ZIP ได้เลย", meta_list, "Success"
+    else:
+        yield results, None, "❌ ไม่มีรูปที่ประมวลผลสำเร็จเลย ไฟล์ ZIP จึงไม่ได้สร้าง", meta_list, "Failed"
 
+# --- UI Interface ---
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# 🖼️ AI Stock Metadata Pro (Final Version)")
+    gr.Markdown("# 🖼️ AI Auto Metadata PRO (Batch Edition)")
     state = gr.State([])
     with gr.Row():
         with gr.Column(scale=1):
-            inp = gr.File(label="Upload", file_count="multiple")
-            sld = gr.Slider(10, 50, 49, step=1, label="Target Keywords")
-            btn = gr.Button("🚀 Start", variant="primary")
-            dl = gr.File(label="Download ZIP")
-            log = gr.Textbox(label="Status", lines=3)
+            inp = gr.File(label="📂 เลือกรูปภาพ (หลายรูปได้)", file_count="multiple")
+            sld = gr.Slider(10, 50, 49, step=1, label="จำนวน Keywords")
+            btn = gr.Button("🚀 เริ่มประมวลผลทั้งหมด", variant="primary")
+            dl = gr.File(label="📦 ดาวน์โหลด ZIP ที่นี่")
+            log = gr.Textbox(label="สถานะ", lines=4)
         with gr.Column(scale=2):
-            gal = gr.Gallery(label="Results", columns=3)
-            info = gr.Textbox(label="Current Metadata Info", lines=8)
-            raw = gr.Textbox(label="AI Debug", lines=5)
+            gal = gr.Gallery(label="รูปที่ทำเสร็จแล้ว", columns=3, height="auto")
+            info = gr.Textbox(label="ข้อมูล Metadata (คลิกที่รูปใน Gallery)", lines=8)
+            raw = gr.Textbox(label="AI Debug (ดูข้อความจาก AI)", lines=5)
 
     btn.click(process, [inp, sld], [gal, dl, log, state, raw])
-    gal.select(lambda e, s: s[e.index] if e.index < len(s) else "", [state], info)
+    gal.select(lambda e, s: s[e.index] if e.index < len(s) else "ไม่มีข้อมูล", [state], info)
 
 demo.launch(server_name="0.0.0.0", server_port=7860, allowed_paths=["/workspace"])
