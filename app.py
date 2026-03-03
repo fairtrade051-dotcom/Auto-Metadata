@@ -2,12 +2,13 @@ import os
 import base64
 import subprocess
 import shutil
+import re
 import gradio as gr
 from PIL import Image
 from openai import OpenAI
 from io import BytesIO
 
-# ✅ เชื่อมต่อ Ollama (ใช้โมเดลที่รันในเครื่องเดียวกัน)
+# ✅ เชื่อมต่อ Ollama
 client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
 
 # 📁 ตั้งค่า Folder บน RunPod
@@ -25,7 +26,6 @@ def encode_image_to_base64(image_path):
 def generate_metadata_from_vision(image_path, keyword_count):
     base64_image = encode_image_to_base64(image_path)
     
-    # คำสั่งให้ AI ทำงาน
     prompt = f"""Analyze this image and provide:
     1. A short, descriptive Title (max 10 words).
     2. A detailed Description (1 sentence).
@@ -37,7 +37,6 @@ def generate_metadata_from_vision(image_path, keyword_count):
     Keywords: [word1, word2, word3...]"""
 
     try:
-        # เปลี่ยนมาใช้ llama3.2-vision ซึ่งเก่งเรื่องดูรูปภาพ
         response = client.chat.completions.create(
             model="llama3.2-vision", 
             messages=[
@@ -51,15 +50,24 @@ def generate_metadata_from_vision(image_path, keyword_count):
             ]
         )
         content = response.choices[0].message.content
-        title, description, keywords = "Untitled", "No description", []
         
-        # แยกข้อมูลที่ AI ตอบกลับมา
-        for line in content.split('\n'):
-            if line.startswith("Title:"): title = line.replace("Title:", "").strip()
-            if line.startswith("Description:"): description = line.replace("Description:", "").strip()
-            if line.startswith("Keywords:"): 
-                kw_str = line.replace("Keywords:", "").strip()
-                keywords = [k.strip() for k in kw_str.split(",") if k.strip()]
+        # 💡 ใช้ Regex เพื่อดึงข้อความให้แม่นยำขึ้น (ป้องกัน AI พิมพ์ติด ** มา)
+        title = "Untitled"
+        description = "No description"
+        keywords = []
+
+        match_title = re.search(r'Title:\s*([^\n]*)', content, re.IGNORECASE)
+        if match_title: title = match_title.group(1).replace('*', '').strip()
+
+        match_desc = re.search(r'Description:\s*([^\n]*)', content, re.IGNORECASE)
+        if match_desc: description = match_desc.group(1).replace('*', '').strip()
+
+        match_kw = re.search(r'Keywords:\s*(.*)', content, re.IGNORECASE | re.DOTALL)
+        if match_kw:
+            kw_str = match_kw.group(1).replace('*', '').replace('\n', '').strip()
+            # ตัดแบ่งคีย์เวิร์ด และบังคับจำนวนคำตามที่ผู้ใช้เลือก
+            keywords = [k.strip() for k in kw_str.split(",") if k.strip()][:keyword_count]
+
         return title, description, keywords
     except Exception as e:
         return "Error", f"AI Error: {e}", ["error"]
@@ -76,7 +84,6 @@ def embed_metadata(image_path, title, description, keywords, temp_out_dir):
 
         keyword_str = ", ".join(keywords)
 
-        # ใช้ ExifTool ฝังข้อมูลลงไฟล์ภาพ
         subprocess.run([
             "exiftool", "-overwrite_original", "-charset", "filename=utf8",
             f"-Title={title}", f"-Description={description}", f"-Subject={keyword_str}",
@@ -90,9 +97,10 @@ def embed_metadata(image_path, title, description, keywords, temp_out_dir):
 
 def process_images(image_files, keyword_count):
     if not image_files:
-        return [], None, "⚠️ ไม่พบไฟล์รูปภาพ", []
+        yield [], None, "⚠️ ไม่พบไฟล์รูปภาพ", []
+        return
     
-    # ล้างไฟล์เก่าออกก่อนเริ่มงานใหม่
+    # ล้างไฟล์เก่าออก
     if os.path.exists(output_folder):
         shutil.rmtree(output_folder)
     os.makedirs(output_folder, exist_ok=True)
@@ -102,59 +110,72 @@ def process_images(image_files, keyword_count):
     processed_paths = []
     log_messages = []
     metadata_info_list = [] 
+    total_files = len(image_files)
 
-    for file_obj in image_files:
+    # 💡 เปลี่ยนมาใช้ Yield เพื่อส่งรูปและสถานะกลับไปโชว์ที่หน้าเว็บ "ทีละรูป" (แก้ปัญหาเว็บค้างตอนทำ 100 รูป)
+    for i, file_obj in enumerate(image_files, 1):
         img_path = file_obj.name
         filename = os.path.basename(img_path)
-        log_messages.append(f"🔄 กำลังประมวลผล: {filename}")
         
-        # เรียก AI วิเคราะห์
+        current_log = f"🔄 กำลังประมวลผล ({i}/{total_files}): {filename}..."
+        log_messages.append(current_log)
+        # อัปเดต UI ทันทีว่ากำลังทำรูปไหนอยู่ (โชว์ Log แค่ 5 บรรทัดล่าสุดกันรก)
+        yield processed_paths, None, "\n".join(log_messages[-5:]), metadata_info_list
+        
+        # 1. ให้ AI วิเคราะห์
         title, desc, kws = generate_metadata_from_vision(img_path, keyword_count)
         
-        # เก็บข้อมูลไว้แสดงตอนผู้ใช้คลิกดูรูป
-        info_text = f"📌 ไฟล์: {filename}\n🏷️ หัวข้อ: {title}\n📝 คำอธิบาย: {desc}\n🔑 คีย์เวิร์ด ({len(kws)} คำ):\n{', '.join(kws)}"
-        metadata_info_list.append(info_text)
-
-        # ฝัง Metadata ลงภาพ
+        # 2. ฝัง Metadata
         out_path = embed_metadata(img_path, title, desc, kws, output_folder)
+        
         if out_path:
+            # เก็บข้อมูลเฉพาะเมื่อฝังไฟล์สำเร็จ เพื่อให้ Index ของรูปกับข้อมูลตรงกันเป๊ะเวลาคลิก
             processed_paths.append(out_path)
-            log_messages.append(f"✅ สำเร็จ: {filename} (ได้คีย์เวิร์ด {len(kws)} คำ)\n---")
+            info_text = f"📌 ไฟล์: {filename}\n🏷️ หัวข้อ: {title}\n📝 คำอธิบาย: {desc}\n🔑 คีย์เวิร์ด ({len(kws)} คำ):\n{', '.join(kws)}"
+            metadata_info_list.append(info_text)
+            log_messages[-1] = f"✅ สำเร็จ ({i}/{total_files}): {filename} (ได้ {len(kws)} คำ)"
         else:
-            log_messages.append(f"❌ ล้มเหลว: {filename}\n---")
+            log_messages[-1] = f"❌ ล้มเหลว ({i}/{total_files}): {filename}"
 
-    # บีบอัดไฟล์เป็น ZIP
+        # ส่งรูปที่เสร็จแล้วไปโชว์ใน Gallery ทันที
+        yield processed_paths, None, "\n".join(log_messages[-5:]), metadata_info_list
+
+    # เมื่อทำครบทุกรูป ค่อยบีบอัดเป็น ZIP
+    log_messages.append("📦 กำลังสร้างไฟล์ ZIP...")
+    yield processed_paths, None, "\n".join(log_messages[-5:]), metadata_info_list
+    
     shutil.make_archive(zip_filepath.replace('.zip', ''), 'zip', output_folder)
-
-    return processed_paths, zip_filepath, "\n".join(log_messages), metadata_info_list
+    
+    log_messages[-1] = "🎉 ประมวลผลเสร็จสิ้นทั้งหมด! ดาวน์โหลดไฟล์ ZIP ได้เลย"
+    yield processed_paths, zip_filepath, "\n".join(log_messages[-5:]), metadata_info_list
 
 def show_metadata(evt: gr.SelectData, metadata_list):
+    # ดึงข้อมูลมาแสดงเมื่อผู้ใช้คลิกรูปใน Gallery
     if metadata_list and evt.index < len(metadata_list):
         return metadata_list[evt.index]
-    return "ไม่มีข้อมูล"
+    return "⚠️ ไม่พบข้อมูล Metadata สำหรับรูปนี้"
 
-# --- สร้างหน้าตาเว็บ (Web UI) ด้วย Gradio ---
+# --- UI (Gradio) ---
 with gr.Blocks(title="Auto Metadata AI", theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# 🖼️ AI Auto Metadata Tagger 🚀")
+    gr.Markdown("# 🖼️ AI Auto Metadata Tagger (Batch 100+) 🚀")
     
     metadata_state = gr.State([])
 
     with gr.Row():
         with gr.Column(scale=1):
-            file_input = gr.File(label="📂 1. อัปโหลดรูปภาพ (เลือกได้หลายรูป)", file_count="multiple", type="filepath")
+            file_input = gr.File(label="📂 1. อัปโหลดรูปภาพ (โยนมา 100 รูปได้เลย)", file_count="multiple", type="filepath")
             keyword_slider = gr.Slider(minimum=10, maximum=50, value=49, step=1, label="🎛️ 2. กำหนดจำนวนคีย์เวิร์ดที่ต้องการ")
-            submit_btn = gr.Button("🚀 3. เริ่มประมวลผล", variant="primary")
+            submit_btn = gr.Button("🚀 3. เริ่มประมวลผล (กดปุ๊บ รอดูทีละรูปได้เลย)", variant="primary")
             
             gr.Markdown("---")
-            download_zip = gr.File(label="📦 โหลดไฟล์ทั้งหมดเป็น ZIP (เมื่อเสร็จสิ้น)", interactive=False)
+            download_zip = gr.File(label="📦 โหลดไฟล์ทั้งหมดเป็น ZIP", interactive=False)
             log_output = gr.Textbox(label="📝 สถานะการทำงาน", lines=6, interactive=False)
         
         with gr.Column(scale=2):
             gr.Markdown("### 🖼️ ผลลัพธ์ (คลิกที่รูปเพื่อดูข้อมูล Metadata)")
-            gallery_output = gr.Gallery(label="รูปภาพที่ฝัง Metadata แล้ว", columns=3, height="auto")
+            gallery_output = gr.Gallery(label="กำลังทยอยอัปเดต...", columns=4, height="auto")
             selected_info = gr.Textbox(label="🔍 ข้อมูล Metadata ของรูปที่เลือก", lines=6, interactive=False)
 
-    # เชื่อมโยงปุ่มกับการทำงาน
     submit_btn.click(
         fn=process_images,
         inputs=[file_input, keyword_slider],
@@ -168,5 +189,4 @@ with gr.Blocks(title="Auto Metadata AI", theme=gr.themes.Soft()) as demo:
     )
 
 if __name__ == "__main__":
-    # เปิด Port 7860 และอนุญาตให้เข้าถึงโฟลเดอร์ /workspace เพื่อแก้ปัญหา InvalidPathError
     demo.launch(server_name="0.0.0.0", server_port=7860, allowed_paths=["/workspace"])
