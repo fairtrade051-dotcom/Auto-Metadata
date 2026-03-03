@@ -6,42 +6,59 @@ zip_filepath = "/workspace/processed_images.zip"
 
 def generate_metadata(image_path, kw_count):
     try:
-        # สั่ง AI แบบบังคับเอาคำตอบ
-        prompt = f"Describe this image. Format your output exactly as:\nTitle: [title]\nDescription: [description]\nKeywords: [keyword1, keyword2, ... {kw_count} words]"
+        prompt = f"Describe this image for stock photography. Output as:\nTitle: [title]\nDescription: [description]\nKeywords: [keyword1, keyword2, ... {kw_count} words]"
         
         res = ollama.chat(model='llama3.2-vision', messages=[{
-            'role': 'user',
-            'content': prompt,
-            'images': [image_path]
+            'role': 'user', 'content': prompt, 'images': [image_path]
         }])
         
-        txt = res['message']['content']
+        txt = res['message']['content'].replace("*", "")
         
-        # ล้างพวกเครื่องหมายดอกจันออกให้หมด
-        clean_txt = txt.replace("*", "")
-        
-        # ดึงข้อมูล (Case-insensitive)
         title = "Untitled"
         desc = "No Description"
         keywords = []
 
-        t_match = re.search(r"(?i)Title:\s*(.*)", clean_txt)
+        # ใช้ Regex ดึงข้อมูล
+        t_match = re.search(r"(?i)Title:\s*(.*)", txt)
         if t_match: title = t_match.group(1).strip()
 
-        d_match = re.search(r"(?i)Description:\s*(.*)", clean_txt)
+        d_match = re.search(r"(?i)Description:\s*(.*)", txt)
         if d_match: desc = d_match.group(1).strip()
 
-        k_match = re.search(r"(?i)Keywords:\s*(.*)", clean_txt)
+        k_match = re.search(r"(?i)Keywords:\s*(.*)", txt)
         if k_match:
             keywords = [k.strip() for k in k_match.group(1).split(",") if len(k.strip()) > 1]
         
-        # ถ้าหา Keywords ไม่เจอจริงๆ ให้กวาดคำมาจากเนื้อความทั้งหมดเลย
         if not keywords:
-            keywords = [k.strip() for k in clean_txt.split() if len(k.strip()) > 3][:kw_count]
+            keywords = [k.strip() for k in txt.split() if len(k.strip()) > 3][:kw_count]
 
         return title, desc, keywords[:kw_count], txt
     except Exception as e:
-        return "Error", "Error", ["error"], f"System Error: {str(e)}"
+        return "Error", "Error", ["error"], f"AI Error: {str(e)}"
+
+def embed_metadata(image_path, title, desc, keywords):
+    try:
+        kw_str = ", ".join(keywords)
+        # ฝังมันทุก Tag ที่โลกนี้ใช้ (Windows, Adobe, Stock sites)
+        cmd = [
+            "exiftool", "-overwrite_original", "-charset", "UTF8",
+            f"-Title={title}",
+            f"-XPTitle={title}",
+            f"-XMP-dc:Title={title}",
+            f"-Description={desc}",
+            f"-ImageDescription={desc}",
+            f"-XMP-dc:Description={desc}",
+            f"-Keywords={kw_str}",
+            f"-Subject={kw_str}",
+            f"-XMP-dc:Subject={kw_str}",
+            f"-IPTC:Keywords={kw_str}",
+            f"-XPKeywords={kw_str}",
+            image_path
+        ]
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        return True, result.stdout
+    except subprocess.CalledProcessError as e:
+        return False, e.stderr
 
 def process(files, kw_count):
     if not files: yield [], None, "❌ No files!", [], "Please upload images."; return
@@ -49,7 +66,7 @@ def process(files, kw_count):
     os.makedirs(output_folder, exist_ok=True)
     
     results, logs, meta_list = [], [], []
-    yield results, None, "🚀 Starting Batch...", meta_list, "Waiting for AI..."
+    yield results, None, "🚀 Starting...", meta_list, ""
 
     for i, f in enumerate(files):
         filename = os.path.basename(f.name)
@@ -58,43 +75,42 @@ def process(files, kw_count):
         
         t, d, k, raw_ai = generate_metadata(f.name, kw_count)
         
-        # ถ้าพัง ให้โชว์ชื่อไฟล์ที่พังด้วย
         if t == "Error":
-            logs[-1] = f"❌ Failed: {filename}"
+            logs[-1] = f"❌ AI Fail: {filename}"
+            meta_list.append(f"File: {filename}\nError: AI did not respond")
         else:
-            logs[-1] = f"✅ Done: {filename}"
+            out = os.path.join(output_folder, filename)
+            with Image.open(f.name) as img:
+                img.convert('RGB').save(out, "JPEG", quality=100)
             
-        info = f"File: {filename}\nTitle: {t}\nKeywords: {', '.join(k)}"
-        meta_list.append(info)
+            success, ex_log = embed_metadata(out, t, d, k)
+            if success:
+                logs[-1] = f"✅ Success: {filename}"
+                meta_list.append(f"File: {filename}\nTitle: {t}\nKeywords: {', '.join(k)}")
+            else:
+                logs[-1] = f"⚠️ Tag Fail: {filename}"
+                meta_list.append(f"File: {filename}\nExifTool Error: {ex_log}")
         
-        out = os.path.join(output_folder, filename)
-        with Image.open(f.name) as img:
-            img.convert('RGB').save(out, "JPEG", quality=100)
-        
-        if t != "Error":
-            kw_str = ", ".join(k)
-            subprocess.run(["exiftool", "-overwrite_original", f"-Title={t}", f"-Description={d}", f"-Keywords={kw_str}", f"-Subject={kw_str}", out])
-        
-        results.append(out)
+        results.append(out if t != "Error" else f.name)
         yield results, None, "\n".join(logs[-5:]), meta_list, raw_ai
 
     shutil.make_archive(zip_filepath.replace('.zip',''), 'zip', output_folder)
-    yield results, zip_filepath, "🎉 Batch Finished!", meta_list, "Done"
+    yield results, zip_filepath, "🎉 Batch Done!", meta_list, "All processes finished."
 
-with gr.Blocks(theme=gr.themes.Default()) as demo:
-    gr.Markdown("# 🖼️ AI Metadata Batch Pro")
+with gr.Blocks(theme=gr.themes.Soft()) as demo:
+    gr.Markdown("# 🖼️ AI Stock Metadata Pro (Final Version)")
     state = gr.State([])
     with gr.Row():
         with gr.Column(scale=1):
             inp = gr.File(label="Upload", file_count="multiple")
-            sld = gr.Slider(10, 50, 49, step=1, label="Keywords")
+            sld = gr.Slider(10, 50, 49, step=1, label="Target Keywords")
             btn = gr.Button("🚀 Start", variant="primary")
             dl = gr.File(label="Download ZIP")
             log = gr.Textbox(label="Status", lines=3)
         with gr.Column(scale=2):
-            gal = gr.Gallery(label="Output", columns=3)
-            info = gr.Textbox(label="Metadata Info", lines=5)
-            raw = gr.Textbox(label="AI Debug (ดูตรงนี้ถ้ามันขึ้น Error)", lines=5)
+            gal = gr.Gallery(label="Results", columns=3)
+            info = gr.Textbox(label="Current Metadata Info", lines=8)
+            raw = gr.Textbox(label="AI Debug", lines=5)
 
     btn.click(process, [inp, sld], [gal, dl, log, state, raw])
     gal.select(lambda e, s: s[e.index] if e.index < len(s) else "", [state], info)
