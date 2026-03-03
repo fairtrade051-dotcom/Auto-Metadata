@@ -3,9 +3,12 @@ import torch
 from transformers import AutoProcessor, AutoModelForCausalLM
 from PIL import Image
 
-# โหลด Model ครั้งแรกครั้งเดียว (ขนาด ~500MB)
+# ตรวจสอบ GPU
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model_id = "microsoft/Florence-2-base"
+
+print(f"⏳ กำลังโหลดโมเดล Florence-2 ไว้บน {device}... (รอนิดนึงครับ)")
+# โหลดโมเดล
 model = AutoModelForCausalLM.from_pretrained(model_id, trust_remote_code=True).to(device).eval()
 processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
 
@@ -24,7 +27,7 @@ def run_ai(image, task_prompt):
     return generated_text
 
 def process(files, kw_count):
-    if not files: yield [], None, "❌ No files!"; return
+    if not files: yield [], None, "❌ ไม่มีไฟล์!", []; return
     if os.path.exists(output_folder): shutil.rmtree(output_folder)
     os.makedirs(output_folder, exist_ok=True)
 
@@ -32,48 +35,52 @@ def process(files, kw_count):
     
     for i, f in enumerate(files):
         fname = os.path.basename(f.name)
-        logs.append(f"🔄 Processing {i+1}/{len(files)}: {fname}")
+        logs.append(f"🔄 กำลังทำรูปที่ {i+1}/{len(files)}: {fname}")
         yield results, None, "\n".join(logs[-5:]), meta_list
         
-        img = Image.open(f.name).convert("RGB")
-        
-        # 1. สร้าง Title & Description
-        caption = run_ai(img, "<DETAILED_CAPTION>")
-        title = caption[:50] + "..." if len(caption) > 50 else caption
-        
-        # 2. สร้าง Keywords (ใช้วิธีสกัดจาก Caption)
-        tags_raw = run_ai(img, "<MORE_DETAILED_CAPTION>")
-        keywords = list(set([k.strip() for k in tags_raw.replace(".", "").split() if len(k) > 3]))[:kw_count]
-        
-        # 3. เซฟรูปและฝัง Metadata
-        out = os.path.join(output_folder, fname)
-        img.save(out, "JPEG", quality=100)
-        
-        kw_str = ", ".join(keywords)
-        subprocess.run(["exiftool", "-overwrite_original", f"-Title={title}", f"-Description={caption}", f"-Keywords={kw_str}", f"-Subject={kw_str}", out])
-        
-        results.append(out)
-        meta_list.append(f"📌 {fname}\nTitle: {title}\nKeywords: {kw_str}")
-        logs[-1] = f"✅ Done: {fname}"
+        try:
+            img = Image.open(f.name).convert("RGB")
+            
+            # 1. สร้าง Title (ใช้ Detailed Caption)
+            caption = run_ai(img, "<DETAILED_CAPTION>")
+            title = caption[:60].strip()
+            
+            # 2. สร้าง Keywords (ใช้ More Detailed Caption มาแยกคำ)
+            tags_raw = run_ai(img, "<MORE_DETAILED_CAPTION>")
+            # สกัดคำที่ยาวกว่า 3 ตัวอักษรมาเป็นคีย์เวิร์ด
+            keywords = list(set([k.strip(",.") for k in tags_raw.split() if len(k) > 3]))[:kw_count]
+            
+            # 3. เซฟและฝัง Metadata
+            out = os.path.join(output_folder, fname)
+            img.save(out, "JPEG", quality=100)
+            
+            kw_str = ", ".join(keywords)
+            subprocess.run(["exiftool", "-overwrite_original", f"-Title={title}", f"-Description={caption}", f"-Keywords={kw_str}", f"-Subject={kw_str}", out])
+            
+            results.append(out)
+            meta_list.append(f"📌 {fname}\nTitle: {title}\nKeywords: {kw_str}")
+            logs[-1] = f"✅ เสร็จแล้ว: {fname}"
+        except Exception as e:
+            logs[-1] = f"❌ พังที่รูปนี้: {str(e)}"
+            
         yield results, None, "\n".join(logs[-5:]), meta_list
 
     shutil.make_archive(zip_filepath.replace('.zip',''), 'zip', output_folder)
-    yield results, zip_filepath, "🎉 Finished!", meta_list
+    yield results, zip_filepath, "🎉 เสร็จสิ้นทุกรูปแล้ว!", meta_list
 
-with gr.Blocks() as demo:
-    gr.Markdown("# 🖼️ Auto Metadata (No Ollama Version)")
+with gr.Blocks(theme=gr.themes.Soft()) as demo:
+    gr.Markdown("# 🖼️ Auto Metadata (Florence-2 Version)")
     with gr.Row():
         with gr.Column():
-            inp = gr.File(file_count="multiple")
-            sld = gr.Slider(10, 50, 30, step=1, label="Keywords Count")
-            btn = gr.Button("🚀 Start", variant="primary")
-            dl = gr.File(label="Download ZIP")
-            log = gr.Textbox(label="Status")
+            inp = gr.File(label="อัปโหลดรูปภาพ", file_count="multiple")
+            sld = gr.Slider(10, 50, 30, step=1, label="จำนวน Keywords")
+            btn = gr.Button("🚀 เริ่มทำงาน", variant="primary")
+            dl = gr.File(label="ดาวน์โหลดไฟล์ ZIP")
+            log = gr.Textbox(label="สถานะการทำงาน")
         with gr.Column():
-            gal = gr.Gallery(columns=3)
-            info = gr.Textbox(label="Info", lines=10)
+            gal = gr.Gallery(label="แกลเลอรี่", columns=3)
+            info = gr.Textbox(label="ข้อมูล Metadata", lines=10)
 
-    state = gr.State([])
     btn.click(process, [inp, sld], [gal, dl, log, info])
 
 demo.launch(server_name="0.0.0.0", server_port=7860, allowed_paths=["/workspace"])
