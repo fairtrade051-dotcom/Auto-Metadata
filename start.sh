@@ -1,34 +1,32 @@
 #!/bin/bash
-echo "🚀 [1/5] อัปเดตระบบและลงเครื่องมือจำเป็น..."
-# ลง psmisc เพื่อให้มีคำสั่ง fuser และลงตัวจัดการ GPU
+echo "🚀 [1/5] อัปเดตระบบ..."
 apt-get update && apt-get install -y psmisc curl exiftool pciutils
 
 echo "🧹 [2/5] เคลียร์พอร์ตค้าง..."
 fuser -k 11434/tcp || true
 pkill -9 ollama || true
 
-echo "🦙 [3/5] ติดตั้ง Ollama แบบบังคับ..."
-# โหลด binary มาวางเองเลย ไม่ต้องผ่านสคริปต์ติดตั้งที่มันเอ๋อ
-curl -L https://ollama.com/download/ollama-linux-amd64 -o /usr/local/bin/ollama
+echo "🦙 [3/5] โหลด Ollama จาก GitHub (ชัวร์กว่าเดิม)..."
+# ใช้ Link ตรงจาก GitHub Release เพื่อป้องกันการได้ไฟล์ 9 byte
+curl -L https://github.com/ollama/ollama/releases/download/v0.5.7/ollama-linux-amd64 -o /usr/local/bin/ollama
 chmod +x /usr/local/bin/ollama
 
 echo "▶️ [4/5] สั่ง Ollama Start..."
 export OLLAMA_HOST="0.0.0.0"
 export OLLAMA_MODELS="/workspace/ollama_models"
 mkdir -p $OLLAMA_MODELS
-# รันเบื้องหลังและเก็บ Log ไว้ที่นี่
 nohup /usr/local/bin/ollama serve > /workspace/ollama.log 2>&1 &
 
-echo "⏳ [5/5] รอเช็คสถานะ (Max 30s)..."
-for i in {1..15}; do
+echo "⏳ [5/5] รอเช็คสถานะ..."
+for i in {1..30}; do
     if curl -s http://127.0.0.1:11434/api/tags > /dev/null; then
         echo "✅ Ollama ตื่นแล้ว!"
         break
     fi
-    echo "รอ Ollama แป๊บ... ($i)"
+    echo "รอ Ollama บูทเครื่อง... ($i)"
     sleep 2
-    if [ $i -eq 15 ]; then
-        echo "❌ มันไม่ยอมตื่น! ดูสาเหตุข้างล่างนี้:"
+    if [ $i -eq 30 ]; then
+        echo "❌ ไม่ยอมตื่น! ดู Log:"
         cat /workspace/ollama.log
         exit 1
     fi
