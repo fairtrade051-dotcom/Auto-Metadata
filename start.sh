@@ -1,53 +1,40 @@
 #!/bin/bash
-echo "🚀 เริ่มต้นระบบ Auto-Setup..."
+echo "🚀 [1/5] อัปเดตระบบและลงเครื่องมือจำเป็น..."
+# ลง psmisc เพื่อให้มีคำสั่ง fuser และลงตัวจัดการ GPU
+apt-get update && apt-get install -y psmisc curl exiftool pciutils
 
-# บังคับใช้ GPU (ถ้ามี) และเก็บโมเดลไว้ที่พื้นที่ถาวร
-export OLLAMA_MODELS="/workspace/ollama_models"
-mkdir -p $OLLAMA_MODELS
-cd /workspace/Auto-Metadata
-
-# 1. ติดตั้ง Tools ที่จำเป็น
-apt-get update && apt-get install -y exiftool curl pciutils lsof
-
-# 2. ติดตั้ง Ollama (วิธีมาตรฐาน)
-echo "🦙 กำลังติดตั้ง Ollama..."
-curl -fsSL https://ollama.com/install.sh | sh
-
-# 3. เคลียร์ Process เก่าที่ค้างอยู่ (ถ้ามี)
-echo "🧹 เคลียร์ Port 11434..."
+echo "🧹 [2/5] เคลียร์พอร์ตค้าง..."
 fuser -k 11434/tcp || true
 pkill -9 ollama || true
-sleep 2
 
-# 4. สั่งรัน Ollama แบบ Hardcore (บังคับ Host และเก็บ Log)
-echo "▶️ สั่ง Ollama รันเบื้องหลัง..."
+echo "🦙 [3/5] ติดตั้ง Ollama แบบบังคับ..."
+# โหลด binary มาวางเองเลย ไม่ต้องผ่านสคริปต์ติดตั้งที่มันเอ๋อ
+curl -L https://ollama.com/download/ollama-linux-amd64 -o /usr/local/bin/ollama
+chmod +x /usr/local/bin/ollama
+
+echo "▶️ [4/5] สั่ง Ollama Start..."
 export OLLAMA_HOST="0.0.0.0"
-nohup ollama serve > /workspace/ollama.log 2>&1 &
+export OLLAMA_MODELS="/workspace/ollama_models"
+mkdir -p $OLLAMA_MODELS
+# รันเบื้องหลังและเก็บ Log ไว้ที่นี่
+nohup /usr/local/bin/ollama serve > /workspace/ollama.log 2>&1 &
 
-# 5. รอให้ Ollama ตื่น (จำกัดเวลา 60 วินาที ถ้าไม่ตื่นให้ด่าระบบ)
-echo "⏳ รอ Ollama เตรียมความพร้อม..."
-for i in {1..30}; do
+echo "⏳ [5/5] รอเช็คสถานะ (Max 30s)..."
+for i in {1..15}; do
     if curl -s http://127.0.0.1:11434/api/tags > /dev/null; then
-        echo "✅ Ollama พร้อมใช้งานแล้ว!"
+        echo "✅ Ollama ตื่นแล้ว!"
         break
     fi
-    echo "พยายามติดต่อ Ollama ครั้งที่ $i..."
+    echo "รอ Ollama แป๊บ... ($i)"
     sleep 2
-    if [ $i -eq 30 ]; then
-        echo "❌ ERROR: Ollama แม่งไม่ยอมทำงาน! ดู Log ด้านล่างนี้:"
+    if [ $i -eq 15 ]; then
+        echo "❌ มันไม่ยอมตื่น! ดูสาเหตุข้างล่างนี้:"
         cat /workspace/ollama.log
         exit 1
     fi
 done
 
-# 6. โหลดโมเดล
-echo "🧠 กำลังโหลดโมเดล Llama 3.2 Vision (ห้ามปิดเครื่อง)..."
-ollama pull llama3.2-vision
-
-# 7. ลง Python Packages
-echo "📦 ติดตั้ง Python libraries..."
+echo "🧠 โหลด Model และเริ่มโปรแกรม..."
+/usr/local/bin/ollama pull llama3.2-vision
 pip install -r requirements.txt
-
-# 8. รันหน้าเว็บ UI
-echo "✅ ทุกอย่างพร้อม! กำลังเปิดหน้าเว็บ..."
 python app.py
